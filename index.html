@@ -1,9 +1,9 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3D 粒子重构星球交互系统 (文字静止版)</title>
+    <title>3D 粒子重构星球交互系统 (移动端优化版)</title>
     <style>
         * {
             box-sizing: border-box;
@@ -30,12 +30,13 @@
         }
         #ui-overlay {
             position: absolute;
-            top: 20px;
-            left: 20px;
+            top: 15px;
+            left: 15px;
+            right: 15px;
             z-index: 10;
             color: rgba(255, 255, 255, 0.8);
             background: rgba(0, 0, 0, 0.75);
-            padding: 15px 20px;
+            padding: 12px 15px;
             border-radius: 8px;
             backdrop-filter: blur(5px);
             border: 1px solid rgba(255, 165, 0, 0.2);
@@ -43,18 +44,18 @@
         }
         #ui-overlay h3 {
             color: #ffaa00;
-            margin-bottom: 8px;
-            font-size: 16px;
+            margin-bottom: 5px;
+            font-size: 14px;
             letter-spacing: 1px;
         }
         #ui-overlay p {
-            font-size: 13px;
-            line-height: 1.6;
+            font-size: 11px;
+            line-height: 1.5;
         }
         .status-item {
             display: flex;
             justify-content: space-between;
-            margin-top: 10px;
+            margin-top: 8px;
             border-top: 1px solid #444;
             padding-top: 5px;
         }
@@ -64,12 +65,15 @@
         }
         #loading {
             position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.9);
             color: white;
             z-index: 100;
-            font-size: 18px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
             text-align: center;
             transition: opacity 0.5s ease;
         }
@@ -79,7 +83,7 @@
             border: 4px solid rgba(255,165,0,0.2);
             border-top: 4px solid #ffaa00;
             border-radius: 50%;
-            margin: 0 auto 15px;
+            margin-bottom: 15px;
             animation: spin 1s linear infinite;
         }
         @keyframes spin {
@@ -88,22 +92,22 @@
         }
     </style>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://lib.baomitu.com/three.js/r128/three.min.js"></script>
+    <script src="https://unpkg.com/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
 </head>
 <body>
 
     <div id="loading">
         <div class="spinner"></div>
-        <div id="loading-text">正在加载 AI 模型与解析文字粒子坐标...</div>
+        <div id="loading-text">正在初始化 3D 引擎与 AI 模型...<br><span style="font-size:12px; color:#aaa;">(首次加载需要约 5-10 秒)</span></div>
     </div>
 
     <div id="ui-overlay">
         <h3>粒子形态转换系统</h3>
-        <p>手势 1 </span></p>
-        <p>手势 2 </span></p>
-        <p>其他/张开/握拳 ➔ <span>回归星球形態，恢复手势旋转</span></p>
+        <p>手势 1 ➔ <span>显示「你好」</span></p>
+        <p>手势 2 ➔ <span>显示「同学」</span></p>
+        <p>张开/握拳 ➔ <span>星球回归 (支持推拉拉远近)</span></p>
         <div class="status-item">
             <span>当前系统状态:</span>
             <span id="gesture-str" class="status-val">初始化中...</span>
@@ -111,48 +115,48 @@
     </div>
 
     <div id="canvas-container"></div>
-    <video id="webcam" autoplay playsinline></video>
+    <video id="webcam" autoplay playsinline muted></video>
 
     <script>
-        // ==========================================
-        // 1. 全局变量与配置
-        // ==========================================
-        let scene, camera, renderer;
-        let allParticles; 
-        let totalCount = 18000; 
+        let scene, camera, renderer, allParticles; 
+        // 手机端将数量调低到 10000 确保流畅度，视觉效果依然管够
+        let totalCount = 10000; 
         
-        let origPositions = []; 
-        let origColors = [];    
-        let text1Positions = [];
-        let text2Positions = [];
-        
+        let origPositions = []; let origColors = [];    
+        let text1Positions = []; text2Positions = [];
         let morphMode = 'default'; 
         
-        // 相机交互参数
         let targetCamRadius = 45; let currentCamRadius = 45;
         const MIN_CAM_RADIUS = 20; const MAX_CAM_RADIUS = 90;
-        
-        // 初始让视角正对前方
         let targetCamAngleX = 0; let targetCamAngleY = 0;
         let currentCamAngleX = 0; let currentCamAngleY = 0;
         let lastHandZ = null; let lastHandAngle = null;
 
         const gestureStrEl = document.getElementById('gesture-str');
         const loadingEl = document.getElementById('loading');
+        const loadingTextEl = document.getElementById('loading-text');
 
-        // ==========================================
-        // 2. 预计算：从 Canvas 像素中提取 3D 文字粒子坐标
-        // ==========================================
+        // 强行设置安全超时限制：5秒后如果还没加载完，强制关闭加载层让用户至少能看3D特效
+        setTimeout(() => {
+            if(loadingEl.style.display !== 'none'){
+                hideLoading();
+                gestureStrEl.innerText = "环境受限，已切换至纯3D预览模式";
+            }
+        }, 6000);
+
+        function hideLoading() {
+            loadingEl.style.opacity = 0;
+            setTimeout(() => loadingEl.style.display = 'none', 500);
+        }
+
         function sampleTextPositions(text, count) {
             const canvas = document.createElement('canvas');
-            canvas.width = 256;
-            canvas.height = 256;
+            canvas.width = 128; // 降低画布分辨率加快手机解析速度
+            canvas.height = 128;
             const ctx = canvas.getContext('2d');
-            
             ctx.fillStyle = '#000000';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
-            
-            ctx.font = 'bold 55px "Microsoft YaHei", sans-serif';
+            ctx.font = 'bold 28px "Microsoft YaHei", sans-serif';
             ctx.fillStyle = '#ffffff';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
@@ -160,28 +164,23 @@
             
             const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
             const pixels = [];
-            
-            for (let y = 0; y < canvas.height; y += 2) {
-                for (let x = 0; x < canvas.width; x += 2) {
+            for (let y = 0; y < canvas.height; y += 1) {
+                for (let x = 0; x < canvas.width; x += 1) {
                     const idx = (y * canvas.width + x) * 4;
-                    if (imgData.data[idx] > 128) { 
-                        const posX = (x - canvas.width / 2) * 0.15;
-                        const posY = -(y - canvas.height / 2) * 0.15;
-                        const posZ = (Math.random() - 0.5) * 0.5; // 文字厚度稍微收敛，让结构更扁平清晰
-                        pixels.push({x: posX, y: posY, z: posZ});
+                    if (imgData.data[idx] > 140) { 
+                        pixels.push({
+                            x: (x - canvas.width / 2) * 0.3,
+                            y: -(y - canvas.height / 2) * 0.3,
+                            z: (Math.random() - 0.5) * 0.5
+                        });
                     }
                 }
             }
-            
             const pts = [];
             for (let i = 0; i < count; i++) {
                 if (pixels.length > 0) {
                     const targetPt = pixels[i % pixels.length];
-                    pts.push(
-                        targetPt.x + (Math.random() - 0.5) * 0.1,
-                        targetPt.y + (Math.random() - 0.5) * 0.1,
-                        targetPt.z
-                    );
+                    pts.push(targetPt.x + (Math.random() - 0.5) * 0.1, targetPt.y + (Math.random() - 0.5) * 0.1, targetPt.z);
                 } else {
                     pts.push(0, 0, 0);
                 }
@@ -189,19 +188,15 @@
             return new Float32Array(pts);
         }
 
-        // ==========================================
-        // 3. 初始化 Three.js 场景与粒子
-        // ==========================================
         function initThree() {
             const container = document.getElementById('canvas-container');
             scene = new THREE.Scene();
             scene.fog = new THREE.FogExp2(0x000000, 0.01);
 
             camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
-            
-            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer = new THREE.WebGLRenderer({ antialias: false }); // 手机端关闭抗锯齿提升帧率
             renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5)); // 限制像素比
             container.appendChild(renderer.domElement);
 
             text1Positions = sampleTextPositions("你好", totalCount);
@@ -210,41 +205,26 @@
             const geometry = new THREE.BufferGeometry();
             const positions = new Float32Array(totalCount * 3);
             const colors = new Float32Array(totalCount * 3);
-
-            const planetCount = 11000;
-            const planetRadius = 10;
+            const planetCount = Math.floor(totalCount * 0.6);
 
             for (let i = 0; i < totalCount; i++) {
                 if (i < planetCount) {
-                    const r = planetRadius + (Math.random() - 0.5) * 0.5;
+                    const r = 10 + (Math.random() - 0.5) * 0.5;
                     const theta = Math.acos(Math.random() * 2 - 1);
                     const phi = Math.random() * Math.PI * 2;
-
                     positions[i * 3] = r * Math.sin(theta) * Math.cos(phi);
                     positions[i * 3 + 1] = r * Math.sin(theta) * Math.sin(phi);
                     positions[i * 3 + 2] = r * Math.cos(theta);
-
-                    colors[i * 3] = 1.0; 
-                    colors[i * 3 + 1] = 0.3 + Math.random() * 0.4; 
-                    colors[i * 3 + 2] = 0.0; 
+                    colors[i * 3] = 1.0; colors[i * 3 + 1] = 0.3 + Math.random() * 0.4; colors[i * 3 + 2] = 0.0; 
                 } else {
-                    const isOuter = Math.random() > 0.5;
-                    const innerR = isOuter ? 18 : 15;
-                    const outerR = isOuter ? 30 : 22;
-                    
-                    const r = innerR + Math.random() * (outerR - innerR);
+                    const r = 15 + Math.random() * 10;
                     const theta = Math.random() * Math.PI * 2;
-
                     positions[i * 3] = r * Math.cos(theta);
                     positions[i * 3 + 1] = (Math.random() - 0.5) * 0.6;
                     positions[i * 3 + 2] = r * Math.sin(theta);
-
                     const brightness = 0.7 + Math.random() * 0.3;
-                    colors[i * 3] = brightness;
-                    colors[i * 3 + 1] = brightness + 0.05;
-                    colors[i * 3 + 2] = brightness + 0.1;
+                    colors[i * 3] = brightness; colors[i * 3 + 1] = brightness + 0.05; colors[i * 3 + 2] = brightness + 0.1;
                 }
-
                 origPositions.push(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
                 origColors.push(colors[i * 3], colors[i * 3 + 1], colors[i * 3 + 2]);
             }
@@ -252,10 +232,8 @@
             geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
             geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
-            const texture = createParticleTexture();
             const material = new THREE.PointsMaterial({
-                size: 0.6,
-                map: texture,
+                size: 0.5,
                 transparent: true,
                 blending: THREE.AdditiveBlending,
                 depthWrite: false,
@@ -269,175 +247,97 @@
             animate();
         }
 
-        function createParticleTexture() {
-            const canvas = document.createElement('canvas');
-            canvas.width = 64; canvas.height = 64;
-            const ctx = canvas.getContext('2d');
-            const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
-            gradient.addColorStop(0, 'rgba(255,255,255,1)');
-            gradient.addColorStop(0.2, 'rgba(255,230,180,1)');
-            gradient.addColorStop(0.5, 'rgba(255,100,0,0.4)');
-            gradient.addColorStop(1, 'rgba(0,0,0,0)');
-            ctx.fillStyle = gradient;
-            ctx.fillRect(0, 0, 64, 64);
-            return new THREE.CanvasTexture(canvas);
-        }
-
-        // ==========================================
-        // 4. 动画主循环 (旋转重构逻辑)
-        // ==========================================
         function animate() {
             requestAnimationFrame(animate);
-
             const posAttr = allParticles.geometry.attributes.position;
             const colorAttr = allParticles.geometry.attributes.color;
             const time = Date.now() * 0.001;
 
             if (morphMode === 'default') {
-                // 星球模式：允许基础自转自旋
-                allParticles.rotation.y += 0.002;
-                
-                // 相机跟随手势进行轨道旋转计算
+                allParticles.rotation.y += 0.004;
                 currentCamAngleX += (targetCamAngleX - currentCamAngleX) * 0.08;
                 currentCamAngleY += (targetCamAngleY - currentCamAngleY) * 0.08;
             } else {
-                // 文字模式：强制让粒子容器和相机的旋转角度重置归零！确保文字永远正对屏幕、不产生偏斜
                 allParticles.rotation.y *= 0.85;
                 allParticles.rotation.x *= 0.85;
-
                 currentCamAngleX += (0 - currentCamAngleX) * 0.1;
                 currentCamAngleY += (0 - currentCamAngleY) * 0.1;
             }
 
-            // 粒子插值矩阵计算
             for (let i = 0; i < totalCount; i++) {
-                let currentX = posAttr.getX(i);
-                let currentY = posAttr.getY(i);
-                let currentZ = posAttr.getZ(i);
-
-                let targetX, targetY, targetZ;
-                let targetR, targetG, targetB;
+                let currentX = posAttr.getX(i); let currentY = posAttr.getY(i); let currentZ = posAttr.getZ(i);
+                let targetX, targetY, targetZ, targetR, targetG, targetB;
 
                 if (morphMode === 'text1') {
-                    targetX = text1Positions[i * 3];
-                    targetY = text1Positions[i * 3 + 1];
-                    targetZ = text1Positions[i * 3 + 2];
-                    targetR = 0.0; targetG = 1.0; targetB = 0.8; // 青蓝色
+                    targetX = text1Positions[i * 3]; targetY = text1Positions[i * 3 + 1]; targetZ = text1Positions[i * 3 + 2];
+                    targetR = 0.0; targetG = 1.0; targetB = 0.8;
                 } else if (morphMode === 'text2') {
-                    targetX = text2Positions[i * 3];
-                    targetY = text2Positions[i * 3 + 1];
-                    targetZ = text2Positions[i * 3 + 2];
-                    targetR = 1.0; targetG = 0.5; targetB = 0.0; // 金橙色
+                    targetX = text2Positions[i * 3]; targetY = text2Positions[i * 3 + 1]; targetZ = text2Positions[i * 3 + 2];
+                    targetR = 1.0; targetG = 0.5; targetB = 0.0;
                 } else {
-                    const wave = Math.sin(time + i) * 0.05;
-                    targetX = origPositions[i * 3] + wave;
-                    targetY = origPositions[i * 3 + 1];
-                    targetZ = origPositions[i * 3 + 2] + wave;
-                    
-                    targetR = origColors[i * 3];
-                    targetG = origColors[i * 3 + 1];
-                    targetB = origColors[i * 3 + 2];
+                    const wave = Math.sin(time + i * 0.01) * 0.03;
+                    targetX = origPositions[i * 3] + wave; targetY = origPositions[i * 3 + 1]; targetZ = origPositions[i * 3 + 2] + wave;
+                    targetR = origColors[i * 3]; targetG = origColors[i * 3 + 1]; targetB = origColors[i * 3 + 2];
                 }
 
-                posAttr.setXYZ(
-                    i,
-                    currentX + (targetX - currentX) * 0.08,
-                    currentY + (targetY - currentY) * 0.08,
-                    currentZ + (targetZ - currentZ) * 0.08
-                );
-
-                colorAttr.setXYZ(
-                    i,
-                    colorAttr.getX(i) + (targetR - colorAttr.getX(i)) * 0.08,
-                    colorAttr.getY(i) + (targetG - colorAttr.getY(i)) * 0.08,
-                    colorAttr.getZ(i) + (targetB - colorAttr.getZ(i)) * 0.08
-                );
+                posAttr.setXYZ(i, currentX + (targetX - currentX) * 0.1, currentY + (targetY - currentY) * 0.1, currentZ + (targetZ - currentZ) * 0.1);
+                colorAttr.setXYZ(i, colorAttr.getX(i) + (targetR - colorAttr.getX(i)) * 0.1, colorAttr.getY(i) + (targetG - colorAttr.getY(i)) * 0.1, colorAttr.getZ(i) + (targetB - colorAttr.getZ(i)) * 0.1);
             }
 
             posAttr.needsUpdate = true;
             colorAttr.needsUpdate = true;
 
-            // 相机距离缩放（无论什么模式都支持推拉，防止穿模）
-            const radiusDiff = targetCamRadius - currentCamRadius;
-            currentCamRadius += radiusDiff * 0.1;
-
-            // 重新计算相机空间坐标
+            currentCamRadius += (targetCamRadius - currentCamRadius) * 0.1;
             camera.position.x = currentCamRadius * Math.sin(currentCamAngleX) * Math.cos(currentCamAngleY);
             camera.position.y = currentCamRadius * Math.sin(currentCamAngleY);
             camera.position.z = currentCamRadius * Math.cos(currentCamAngleX) * Math.cos(currentCamAngleY);
-
             camera.lookAt(0, 0, 0);
             renderer.render(scene, camera);
         }
 
-        // ==========================================
-        // 5. MediaPipe 手势识别控制核心
-        // ==========================================
         function onResults(results) {
-            if (loadingEl.style.display !== 'none') {
-                loadingEl.style.opacity = 0;
-                setTimeout(() => loadingEl.style.display = 'none', 500);
-            }
-
+            hideLoading();
             if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
                 gestureStrEl.innerText = "未检测到手势 (默认星球形态)";
-                morphMode = 'default';
-                lastHandZ = null; lastHandAngle = null;
+                morphMode = 'default'; lastHandZ = null; lastHandAngle = null;
                 return;
             }
 
             const landmarks = results.multiHandLandmarks[0];
             const fingersUp = checkFingersUp(landmarks);
             const upCount = fingersUp.reduce((a, b) => a + b, 0);
-            
-            const wrist = landmarks[0];
-            const mcp9 = landmarks[9];
+            const wrist = landmarks[0]; const mcp9 = landmarks[9];
             const handSizeInFrame = Math.sqrt(Math.pow(wrist.x - mcp9.x, 2) + Math.pow(wrist.y - mcp9.y, 2));
             const handAngle = Math.atan2(mcp9.y - wrist.y, mcp9.x - wrist.x);
 
             if (upCount === 1 && fingersUp[1] === 1) {
-                morphMode = 'text1';
-                gestureStrEl.innerText = "手势 1 ➔ 聚焦文本「你好」";
-                lastHandZ = null; 
+                morphMode = 'text1'; gestureStrEl.innerText = "手势 1 ➔ 聚焦文本「你好」"; lastHandZ = null; 
             } else if (upCount === 2 && fingersUp[1] === 1 && fingersUp[2] === 1) {
-                morphMode = 'text2';
-                gestureStrEl.innerText = "手势 2 ➔ 聚焦文本「同学」";
-                lastHandZ = null;
+                morphMode = 'text2'; gestureStrEl.innerText = "手势 2 ➔ 聚焦文本「同学」"; lastHandZ = null;
             } else {
                 morphMode = 'default';
-
                 if (upCount === 0) {
-                    gestureStrEl.innerText = "握拳 ➔ 星球回归并拉远相机";
+                    gestureStrEl.innerText = "握拳 ➔ 星球回归并拉远";
                     if (lastHandZ !== null) {
-                        const deltaZ = handSizeInFrame - lastHandZ;
-                        if (deltaZ < 0) {
-                            targetCamRadius += Math.abs(deltaZ) * 160;
-                            if (targetCamRadius > MAX_CAM_RADIUS) targetCamRadius = MAX_CAM_RADIUS;
-                        }
+                        if ((handSizeInFrame - lastHandZ) < 0) targetCamRadius = Math.min(MAX_CAM_RADIUS, targetCamRadius + 2);
                     }
                     lastHandZ = handSizeInFrame;
                 } else if (upCount === 5) {
-                    gestureStrEl.innerText = "五指张开 ➔ 星球回归并靠近相机";
+                    gestureStrEl.innerText = "张开 ➔ 星球回归并靠近";
                     if (lastHandZ !== null) {
-                        const deltaZ = handSizeInFrame - lastHandZ;
-                        if (deltaZ > 0) {
-                            targetCamRadius -= Math.abs(deltaZ) * 220;
-                            if (targetCamRadius < MIN_CAM_RADIUS) targetCamRadius = MIN_CAM_RADIUS;
-                        }
+                        if ((handSizeInFrame - lastHandZ) > 0) targetCamRadius = Math.max(MIN_CAM_RADIUS, targetCamRadius - 2);
                     }
                     lastHandZ = handSizeInFrame;
                 } else {
-                    gestureStrEl.innerText = "普通状态 ➔ 默认星球形态";
-                    lastHandZ = null;
+                    gestureStrEl.innerText = "未触发预设手势"; lastHandZ = null;
                 }
             }
 
-            // 手势旋转交互：只有在默认星球状态下才改变 targetCamAngleX
             if (morphMode === 'default' && lastHandAngle !== null) {
                 let angleDelta = handAngle - lastHandAngle;
                 if (angleDelta > Math.PI) angleDelta -= Math.PI * 2;
                 if (angleDelta < -Math.PI) angleDelta += Math.PI * 2;
-                targetCamAngleX -= angleDelta * 2.2; 
+                targetCamAngleX -= angleDelta * 1.5; 
             }
             lastHandAngle = handAngle;
         }
@@ -448,8 +348,7 @@
             if (landmarks[12].y < landmarks[10].y) res[2] = 1; 
             if (landmarks[16].y < landmarks[14].y) res[3] = 1; 
             if (landmarks[20].y < landmarks[18].y) res[4] = 1; 
-            const thumbDistance = Math.abs(landmarks[4].x - landmarks[5].x);
-            if (thumbDistance > 0.04) res[0] = 1;              
+            if (Math.abs(landmarks[4].x - landmarks[5].x) > 0.04) res[0] = 1;              
             return res;
         }
 
@@ -461,24 +360,31 @@
 
         function initMediaPipe() {
             const videoElement = document.getElementById('webcam');
+            // 判断当前是否处于安全上下文
+            if (!window.isSecureContext) {
+                loadingTextEl.innerHTML = "<span style='color:#ff5555;'>⚠️ 运行失败：必须使用 HTTPS 协议访问！</span><br><br>手机端由于隐私限制，禁止在非安全的 http 协议下唤起相机。请配置域名SSL证书，或者使用内网穿透（如 cpolar/ngrok 的 https 映射链接）再用手机打开。";
+                return;
+            }
+
             const hands = new Hands({
-                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+                locateFile: (file) => `https://unpkg.com/@mediapipe/hands/${file}`
             });
 
             hands.setOptions({
                 maxNumHands: 1,
-                modelComplexity: 1,
-                minDetectionConfidence: 0.6,
-                minTrackingConfidence: 0.6
+                modelComplexity: 0, // 移动端降级到 0 极大提升识别响应速度
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
             });
             hands.onResults(onResults);
 
             const cameraUtils = new Camera(videoElement, {
                 onFrame: async () => { await hands.send({ image: videoElement }); },
-                width: 640, height: 480
+                width: 320, height: 240 // 降低摄像头输入流分辨率，减少手机CPU计算负担
             });
+            
             cameraUtils.start().catch(err => {
-                document.getElementById('loading-text').innerText = "未能启动摄像头，请确保权限已开启并使用本地环境运行。";
+                loadingTextEl.innerHTML = "⚠️ 摄像头启动失败<br><br>1. 请确保已授予网页摄像头使用权限。<br>2. 微信内置浏览器可能会拦截此操作，请尝试复制链接在<b>手机系统自带浏览器（如 Safari、Chrome）</b>中打开。";
             });
         }
 
